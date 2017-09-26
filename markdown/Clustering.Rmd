@@ -1,10 +1,101 @@
 ---
-author: "AlexandeR Noll"
 title: "Clustering Cycling performance data"
-output: html_notebook
+author: "AlexandeR Noll"
+output:
+  html_document:
+    df_print: paged
 ---
 
 ```{r setup, include = FALSE}
+library(tidyverse)
+library(cycleRtools)
 
+knitr::opts_chunk$set(
+  warnings = FALSE,
+  message =FALSE
+)
 ```
+
+# Goals
+
+The goal of this mini-project is to cluster some cycling rides: the input data is a time series that contains my wattage at every point in time.
+
+# Data
+
+The data was recorded using the Wahoo Kickr Snap device attached to a road bike. The `.fit` files are available on [GitHub](https://github.com/NOllAl/ClusterCycling). This file format can be read with the [`cycleRtools`]()https://cran.r-project.org/web/packages/cycleRtools/vignettes/cycling_data_analysis.html package. Let us look at one example ride:
+
+```{r load-data}
+last_ride <- read_ride("../data/2017-09-24-15-11-48.fit")
+
+last_ride %>% 
+  ggplot(aes(timer.s, power.smooth.W)) +
+  geom_line()
+```
+
+The plot above has `r nrow(last_ride)` observations and corresponds to a race which lasted about 1.5 hrs. Next, we need to parse all 130 files. 
+
+```{r pasrse-data}
+parse_ride <- function(file) {
+  file <- stringr::str_c("../data/", file)
+  datetime <- stringr::str_sub(file, 9, 27)
+  
+  try({
+    ride <- read_ride(file) %>% 
+      mutate(datetime = datetime) %>% 
+      select(datetime, timer.s, power.smooth.W)
+    
+    return(ride)
+  })
+  return(NULL)
+}
+
+load_rides <- function() {
+  all_files <- list.files("../data")
+  
+  map_df(all_files, parse_ride)
+}
+
+all_rides <- load_rides()
+```
+
+We have `r nrow(distinct(all_rides, datetime))` rides an totally `r nrow(all_rides)` observations.
+
+The data are downsampled to minutewise to make the clustering faster.
+
+```{r nested-ts}
+all_rides_nested <- all_rides %>% 
+  group_by(datetime, minute = floor(timer.s / 60)) %>% 
+  summarise(power.smooth.W = mean(power.smooth.W)) %>% 
+  group_by(datetime) %>% 
+  nest()
+```
+
+Now, we use the `dtwclust` package to combine DTW with a clustering technique. This combination uses DTW to compute pairwise distances and then applies a clustering algorithm to the resulting distance matrix (obiously, the clustering algorithm needs to be able to work with a distance matrix only).
+
+```{r dtw-clust}
+library(dtwclust)
+set.seed(1)
+clustering <- all_rides_nested$data %>% map(pull, power.smooth.W) %>% 
+  tsclust(k = 3, type = "partitional")
+```
+
+Let us make a plot:
+
+```{r plot-clustering}
+all_rides_nested %>% 
+  mutate(cluster = factor(clustering@cluster)) %>% 
+  unnest() %>% 
+  ggplot(aes(minute, power.smooth.W, color = cluster)) +
+  geom_line(aes(group = datetime), alpha = 0.10) +
+  stat_summary(fun.y = "mean", aes(group = cluster, color = cluster), geom = "line") +
+  coord_cartesian(xlim = c(0, 90))
+```
+
+I tried a couple of cluster numbers and partition types (no optimization). The results above look quite interesting:
+
+1. Cluster 1 (red) contains interval trainings, i.e. high efforts followed by low efforts.
+2. Cluster 3 (blue) correspoinds to *races*. This starts out with relatively high efforts and they stay high.
+3. Cluster 2 (green) are recovery rides.
+
+There is much more that could be done (optimization, e.g.).
 
